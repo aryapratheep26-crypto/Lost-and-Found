@@ -1,0 +1,142 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {uid}
+    // Fields:
+    //   - uid: string (required)
+    //   - name: string (required)
+    //   - email: string (required)
+    //   - role: string (required, enum: ["user", "admin"])
+    //   - phone: string (optional)
+    //   - address: string (optional)
+    //   - nearestStationId: string (optional)
+    //   - stationName: string (optional, for admins)
+    //   - contactDetails: string (optional, for admins)
+    //
+    // Collection: complaints
+    // Document ID: {complaintId}
+    // Fields:
+    //   - userId: string (required)
+    //   - type: string (required, enum: ["lost", "found"])
+    //   - description: string (required)
+    //   - status: string (required, enum: ["pending", "under-review", "resolved", "rejected"])
+    //   - assignedStationId: string (required)
+    //   - createdAt: timestamp (required)
+    //   - imageUrl: string (optional)
+    //   - location: map (optional)
+    //   - adminMessage: string (optional)
+    //
+    // Collection: notifications
+    // Document ID: {notificationId}
+    // Fields:
+    //   - userId: string (required, 'admin' or uid)
+    //   - title: string (required)
+    //   - message: string (required)
+    //   - type: string (required, enum: ["status_change", "new_report"])
+    //   - complaintId: string (optional)
+    //   - read: boolean (required)
+    //   - createdAt: timestamp (required)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isDefaultAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == "aryapratheep26@gmail.com" ||
+        request.auth.token.email == "admin@police.gov" ||
+        request.auth.token.email == "ganga@police.com" ||
+        request.auth.token.email.matches(".*@police\\.com$") ||
+        request.auth.token.email.matches(".*@police\\.gov$")
+      );
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && (
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin') ||
+        isDefaultAdmin()
+      );
+    }
+
+    function isValidUser(data, userId) {
+      return data.keys().hasAll(['uid', 'name', 'email', 'role']) &&
+             data.uid == userId &&
+             data.uid is string && data.uid.size() > 0 &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.email is string && data.email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$") &&
+             data.role in ['user', 'admin'];
+    }
+
+    function isValidComplaint(data) {
+      return data.keys().hasAll(['userId', 'type', 'description', 'status', 'assignedStationId', 'createdAt', 'updatedAt']) &&
+             data.userId is string && data.userId == request.auth.uid &&
+             data.type in ['lost', 'found'] &&
+             data.description is string && data.description.size() > 0 && data.description.size() < 2000 &&
+             data.status in ['pending', 'under-review', 'resolved', 'rejected'] &&
+             data.assignedStationId is string &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp &&
+             (!('location' in data) || data.location == null || (data.location is map && data.location.lat is number && data.location.lng is number));
+    }
+
+    function isValidComplaintUpdate(data, prevData) {
+      return data.userId == prevData.userId &&
+             data.type == prevData.type &&
+             data.createdAt == prevData.createdAt &&
+             data.updatedAt is timestamp &&
+             (!('location' in data) || data.location == prevData.location);
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['userId', 'title', 'message', 'type', 'read', 'createdAt']) &&
+             data.userId is string &&
+             data.title is string && data.title.size() > 0 && data.title.size() < 200 &&
+             data.message is string && data.message.size() > 0 && data.message.size() < 1000 &&
+             data.type in ['status_change', 'new_report'] &&
+             data.read is bool &&
+             data.createdAt is timestamp &&
+             (!('complaintId' in data) || data.complaintId is string);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isOwner(userId) && isValidUser(request.resource.data, userId) && (request.resource.data.role == 'user' || isAdmin() || isDefaultAdmin());
+      allow update: if isOwner(userId) && isValidUser(request.resource.data, userId) && (request.resource.data.role == resource.data.role || isAdmin() || isDefaultAdmin());
+    }
+
+    match /complaints/{complaintId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.userId == request.auth.uid);
+      allow create: if isAuthenticated() && isValidComplaint(request.resource.data);
+      allow update: if isAuthenticated() && 
+                    isValidComplaintUpdate(request.resource.data, resource.data) &&
+                    (isAdmin() || resource.data.userId == request.auth.uid);
+      allow delete: if isAdmin();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated() && (isAdmin() || resource.data.userId == request.auth.uid || (resource.data.userId == 'admin' && isAdmin()));
+      allow create: if isAuthenticated() && isValidNotification(request.resource.data);
+      allow update: if isAuthenticated() && (isAdmin() || resource.data.userId == request.auth.uid) && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['read']);
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+  }
+}

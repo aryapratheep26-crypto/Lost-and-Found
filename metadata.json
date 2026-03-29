@@ -1,0 +1,5 @@
+{
+  "name": "State Lost & Found",
+  "description": "A full-stack application connecting users with police stations for reporting and tracking lost and found items.",
+  "requestFramePermissions": ["geolocation"]
+}
